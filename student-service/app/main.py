@@ -104,3 +104,4 @@ def health_check() -> dict[str, str]:
         "service": "student-service",
     }
 # CI trigger - SIT722 Task 8.1P - Arun
+# Final CD pipeline run - Task 8.1P
