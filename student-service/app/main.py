@@ -103,3 +103,4 @@ def health_check() -> dict[str, str]:
         "status": "healthy",
         "service": "student-service",
     }
+# CI trigger - SIT722 Task 8.1P - Arun
