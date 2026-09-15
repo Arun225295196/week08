@@ -5,7 +5,13 @@ on:
   push:
     branches:
       - main
-  
+
+  # Task 9.3C - run tests on pull requests into main
+  # (images are only built/pushed after the PR is merged, see build-and-push "if")
+  pull_request:
+    branches:
+      - main
+
   # Manual trigger for the workflow
   workflow_dispatch:
 
