@@ -1,6 +1,17 @@
 name: 04 - Deploy to Production
 
 on:
+  # Task 9.3C - Continuous Deployment:
+  # production now deploys automatically once the staging smoke test passes
+  workflow_run:
+    workflows:
+      - "03 - Test Staging"
+    types:
+      - completed
+    branches:
+      - main
+
+  # Kept as a manual fallback (e.g. rollback to an earlier tested SHA)
   workflow_dispatch:
     inputs:
       image_tag:
@@ -8,17 +19,34 @@ on:
         required: true
         type: string
 
+# Never run two production deployments at the same time
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
 jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
 
+    # Automatic run: only if the staging smoke test succeeded
+    # Manual run: always allowed
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
     environment:
       name: production
 
+    env:
+      # Same image SHA that was built by CI and tested in staging (no rebuild)
+      IMAGE_TAG: ${{ inputs.image_tag || github.event.workflow_run.head_sha }}
+
     steps:
-      - name: Checkout repository
+      - name: Checkout tested commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag || github.event.workflow_run.head_sha }}
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -31,6 +59,17 @@ jobs:
             --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
+
+      - name: Show image tag being promoted
+        run: |
+          echo "Promoting tested image tag: ${IMAGE_TAG}"
+          echo "### Promoting image tag \`${IMAGE_TAG}\` to production" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify tested image exists in ACR
+        run: |
+          az acr repository show \
+            --name ${{ vars.ACR_NAME }} \
+            --image koalatech-frontend:${IMAGE_TAG}
 
       - name: Create production namespace
         run: |
@@ -69,37 +108,37 @@ jobs:
       - name: Update frontend image
         run: |
           kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ inputs.image_tag }} \
+            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Update user-service image
         run: |
           kubectl set image deployment/user-service \
-            user-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-user-service:${{ inputs.image_tag }} \
+            user-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-user-service:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Update student-service image
         run: |
           kubectl set image deployment/student-service \
-            student-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-student-service:${{ inputs.image_tag }} \
+            student-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-student-service:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Update lecturer-service image
         run: |
           kubectl set image deployment/lecturer-service \
-            lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ inputs.image_tag }} \
+            lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Update course-service image
         run: |
           kubectl set image deployment/course-service \
-            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ inputs.image_tag }} \
+            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Update enrollment-service image
         run: |
           kubectl set image deployment/enrollment-service \
-            enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ inputs.image_tag }} \
+            enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ env.IMAGE_TAG }} \
             -n production
 
       - name: Wait for frontend rollout
@@ -143,3 +182,27 @@ jobs:
           kubectl get pods -n production
           kubectl get services -n production
           kubectl get pvc -n production
+
+      - name: Production smoke test
+        run: |
+          for i in {1..30}; do
+            FRONTEND_IP=$(kubectl get service frontend \
+              -n production \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+            if [ -n "$FRONTEND_IP" ]; then
+              break
+            fi
+
+            echo "Waiting for production frontend IP..."
+            sleep 10
+          done
+
+          if [ -z "$FRONTEND_IP" ]; then
+            echo "Unable to find production frontend IP."
+            exit 1
+          fi
+
+          curl --fail --retry 10 --retry-delay 5 "http://${FRONTEND_IP}"
+
+          echo "Production URL: http://${FRONTEND_IP}" >> "$GITHUB_STEP_SUMMARY"
