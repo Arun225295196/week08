@@ -84,6 +84,16 @@ jobs:
         env:
           AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
         run: |
+          if [ -z "$AZURE_CREDENTIALS" ]; then
+            echo "::error::Repository secret AZURE_CREDENTIALS is empty or missing (it must be a REPOSITORY secret, not an environment secret)"
+            exit 1
+          fi
+          for key in clientId clientSecret subscriptionId tenantId; do
+            if [ "$(jq -r ".$key // empty" <<< "$AZURE_CREDENTIALS")" = "" ]; then
+              echo "::error::AZURE_CREDENTIALS is missing '$key' - paste the full JSON from infra/sp.json"
+              exit 1
+            fi
+          done
           for key in clientId clientSecret subscriptionId tenantId; do
             echo "::add-mask::$(jq -r ".$key" <<< "$AZURE_CREDENTIALS")"
           done
@@ -92,6 +102,7 @@ jobs:
             echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<< "$AZURE_CREDENTIALS")"
             echo "ARM_SUBSCRIPTION_ID=$(jq -r .subscriptionId <<< "$AZURE_CREDENTIALS")"
             echo "ARM_TENANT_ID=$(jq -r .tenantId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_USE_CLI=false"
           } >> "$GITHUB_ENV"
 
       - name: Set up Terraform
@@ -231,6 +242,16 @@ jobs:
         env:
           AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
         run: |
+          if [ -z "$AZURE_CREDENTIALS" ]; then
+            echo "::error::Repository secret AZURE_CREDENTIALS is empty or missing (it must be a REPOSITORY secret, not an environment secret)"
+            exit 1
+          fi
+          for key in clientId clientSecret subscriptionId tenantId; do
+            if [ "$(jq -r ".$key // empty" <<< "$AZURE_CREDENTIALS")" = "" ]; then
+              echo "::error::AZURE_CREDENTIALS is missing '$key' - paste the full JSON from infra/sp.json"
+              exit 1
+            fi
+          done
           for key in clientId clientSecret subscriptionId tenantId; do
             echo "::add-mask::$(jq -r ".$key" <<< "$AZURE_CREDENTIALS")"
           done
@@ -239,6 +260,7 @@ jobs:
             echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<< "$AZURE_CREDENTIALS")"
             echo "ARM_SUBSCRIPTION_ID=$(jq -r .subscriptionId <<< "$AZURE_CREDENTIALS")"
             echo "ARM_TENANT_ID=$(jq -r .tenantId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_USE_CLI=false"
           } >> "$GITHUB_ENV"
 
       - name: Set up Terraform
