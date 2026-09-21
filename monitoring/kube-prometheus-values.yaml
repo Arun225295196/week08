@@ -1,0 +1,38 @@
+# ------------------------------------------------------------------
+# Task 10.2D - values for prometheus-community/kube-prometheus-stack
+# Installed by .github/workflows/00-infrastructure.yml (job: monitoring)
+# ------------------------------------------------------------------
+
+grafana:
+  # Admin credentials come from a Kubernetes secret created by the pipeline
+  # from the GRAFANA_ADMIN_PASSWORD GitHub secret (no default/generated password).
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  service:
+    type: ClusterIP # not exposed publicly - accessed with kubectl port-forward
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard # ConfigMaps with this label are loaded as dashboards
+      labelValue: "1"
+
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    # Pick up every ServiceMonitor/PodMonitor in the cluster, not only ones
+    # carrying the Helm release label (our app ServiceMonitor lives in "production").
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi

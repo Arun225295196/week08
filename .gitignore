@@ -197,3 +197,9 @@ cython_debug/
 .cursorindexingignore
 
 node_modules/
+# Task 10.2D - never commit service principal credentials or Terraform local files
+infra/sp.json
+**/.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
