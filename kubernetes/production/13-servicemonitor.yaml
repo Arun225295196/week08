@@ -1,0 +1,20 @@
+# Task 10.2D - tells Prometheus (kube-prometheus-stack) to scrape /metrics
+# from every KoalaTech backend Service labelled monitoring=koalatech.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: koalatech-services
+  namespace: production
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      monitoring: koalatech
+  namespaceSelector:
+    matchNames:
+      - production
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
