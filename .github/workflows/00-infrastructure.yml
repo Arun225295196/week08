@@ -88,6 +88,9 @@ jobs:
             echo "::error::Repository secret AZURE_CREDENTIALS is empty or missing (it must be a REPOSITORY secret, not an environment secret)"
             exit 1
           fi
+          # Diagnostics (prints only the JSON type and key NAMES - never values)
+          echo "AZURE_CREDENTIALS JSON type: $(jq -r 'type' <<< "$AZURE_CREDENTIALS" 2>&1 | head -1)"
+          echo "AZURE_CREDENTIALS keys: $(jq -c 'if type=="object" then keys elif type=="array" then [.[] | if type=="object" then keys else type end] else type end' <<< "$AZURE_CREDENTIALS" 2>&1 | head -1)"
           for key in clientId clientSecret subscriptionId tenantId; do
             if [ "$(jq -r ".$key // empty" <<< "$AZURE_CREDENTIALS")" = "" ]; then
               echo "::error::AZURE_CREDENTIALS is missing '$key' - paste the full JSON from infra/sp.json"
@@ -246,6 +249,9 @@ jobs:
             echo "::error::Repository secret AZURE_CREDENTIALS is empty or missing (it must be a REPOSITORY secret, not an environment secret)"
             exit 1
           fi
+          # Diagnostics (prints only the JSON type and key NAMES - never values)
+          echo "AZURE_CREDENTIALS JSON type: $(jq -r 'type' <<< "$AZURE_CREDENTIALS" 2>&1 | head -1)"
+          echo "AZURE_CREDENTIALS keys: $(jq -c 'if type=="object" then keys elif type=="array" then [.[] | if type=="object" then keys else type end] else type end' <<< "$AZURE_CREDENTIALS" 2>&1 | head -1)"
           for key in clientId clientSecret subscriptionId tenantId; do
             if [ "$(jq -r ".$key // empty" <<< "$AZURE_CREDENTIALS")" = "" ]; then
               echo "::error::AZURE_CREDENTIALS is missing '$key' - paste the full JSON from infra/sp.json"
