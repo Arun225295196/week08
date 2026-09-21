@@ -86,6 +86,17 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # Task 10.2D - the storage account is now created by Terraform, so read its
+      # connection string from Azure at deploy time instead of a static secret.
+      - name: Get storage connection string
+        run: |
+          CONN=$(az storage account show-connection-string \
+            --name ${{ vars.STORAGE_ACCOUNT_NAME }} \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --query connectionString -o tsv)
+          echo "::add-mask::$CONN"
+          echo "AZURE_STORAGE_CONNECTION_STRING=$CONN" >> "$GITHUB_ENV"
+
       - name: Create application secret
         run: |
           kubectl create secret generic application-secret \
@@ -96,7 +107,7 @@ jobs:
             --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
             --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
             --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ env.AZURE_STORAGE_CONNECTION_STRING }}" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
@@ -206,3 +217,22 @@ jobs:
           curl --fail --retry 10 --retry-delay 5 "http://${FRONTEND_IP}"
 
           echo "Production URL: http://${FRONTEND_IP}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Task 10.2D - confirm Prometheus is scraping the production services
+      - name: Validate production metrics in Prometheus
+        run: |
+          kubectl get servicemonitor -n production
+          kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090 >/dev/null 2>&1 &
+          for i in {1..12}; do
+            sleep 10
+            UP=$(curl -s "http://localhost:9090/api/v1/query" \
+              --data-urlencode 'query=sum(up{namespace="production", job=~".*-service"})' \
+              | jq -r '.data.result[0].value[1] // "0"')
+            echo "Production services scraped by Prometheus: ${UP}/5"
+            if [ "$UP" = "5" ]; then
+              echo "### Prometheus is scraping all 5 production services" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "Prometheus is not scraping all production services"
+          exit 1

@@ -53,6 +53,17 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # Task 10.2D - the storage account is now created by Terraform, so read its
+      # connection string from Azure at deploy time instead of a static secret.
+      - name: Get storage connection string
+        run: |
+          CONN=$(az storage account show-connection-string \
+            --name ${{ vars.STORAGE_ACCOUNT_NAME }} \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --query connectionString -o tsv)
+          echo "::add-mask::$CONN"
+          echo "AZURE_STORAGE_CONNECTION_STRING=$CONN" >> "$GITHUB_ENV"
+
       - name: Create application secret
         run: |
           kubectl create secret generic application-secret \
@@ -63,7 +74,7 @@ jobs:
             --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
             --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
             --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ env.AZURE_STORAGE_CONNECTION_STRING }}" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
