@@ -1,0 +1,263 @@
+name: 00 - Infrastructure and Monitoring
+
+# Task 10.2D
+#   Pull request -> terraform fmt / validate / plan (plan shown in the job summary, nothing changed)
+#   Push to main -> plan + apply, then install/upgrade Prometheus + Grafana on AKS
+#   Manual run   -> choose plan | apply | destroy
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/**"
+      - "monitoring/**"
+      - ".github/workflows/00-infrastructure.yml"
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infra/**"
+      - "monitoring/**"
+      - ".github/workflows/00-infrastructure.yml"
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  contents: read
+
+# Only one Terraform run may touch the remote state at a time
+concurrency:
+  group: terraform-state
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  # Resource names come from GitHub repository variables (single source of truth
+  # shared with the CI/CD workflows).
+  TF_VAR_resource_group_name: ${{ vars.AKS_RESOURCE_GROUP }}
+  TF_VAR_aks_cluster_name: ${{ vars.AKS_CLUSTER_NAME }}
+  TF_VAR_acr_name: ${{ vars.ACR_NAME }}
+  TF_VAR_storage_account_name: ${{ vars.STORAGE_ACCOUNT_NAME }}
+
+jobs:
+
+  # =========================================================
+  # Terraform: format, validate, plan and (conditionally) apply
+  # =========================================================
+  terraform:
+    name: Terraform ${{ inputs.action || (github.event_name == 'push' && 'apply' || 'plan') }}
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/terraform
+
+    outputs:
+      applied: ${{ steps.decide.outputs.apply }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Decide whether to apply
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || \
+             { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.action }}" = "apply" ]; }; then
+            echo "apply=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "apply=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Export Azure service principal for Terraform
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          for key in clientId clientSecret subscriptionId tenantId; do
+            echo "::add-mask::$(jq -r ".$key" <<< "$AZURE_CREDENTIALS")"
+          done
+          {
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_SUBSCRIPTION_ID=$(jq -r .subscriptionId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<< "$AZURE_CREDENTIALS")"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (remote state in Azure Storage)
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=week10.terraform.tfstate"
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        if: inputs.action != 'destroy'
+        run: |
+          terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+          {
+            echo "## Terraform plan"
+            echo '```'
+            grep -E "Plan:|No changes|will be (created|updated|destroyed|replaced)" plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        if: steps.decide.outputs.apply == 'true'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform outputs
+        if: steps.decide.outputs.apply == 'true'
+        run: |
+          terraform output
+          {
+            echo "## Terraform outputs"
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================
+  # Monitoring: Prometheus + Grafana (kube-prometheus-stack)
+  # Runs after a successful apply so the cluster always exists
+  # =========================================================
+  monitoring:
+    name: Deploy and Validate Monitoring
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: needs.terraform.outputs.applied == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Create monitoring namespace and Grafana admin secret
+        run: |
+          kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic grafana-admin \
+            --namespace monitoring \
+            --from-literal=admin-user=admin \
+            --from-literal=admin-password="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Install / upgrade kube-prometheus-stack
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --values monitoring/kube-prometheus-values.yaml \
+            --wait --timeout 15m
+
+      - name: Provision Grafana dashboards (as code)
+        run: kubectl apply -f monitoring/dashboards/
+
+      - name: Validate Prometheus is collecting metrics
+        run: |
+          kubectl get pods -n monitoring
+          kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090 >/dev/null 2>&1 &
+          sleep 10
+          curl --fail -s http://localhost:9090/-/ready
+          TARGETS_UP=$(curl -s "http://localhost:9090/api/v1/query" \
+            --data-urlencode 'query=count(up == 1)' | jq -r '.data.result[0].value[1]')
+          echo "Prometheus targets up: ${TARGETS_UP}"
+          if [ -z "$TARGETS_UP" ] || [ "$TARGETS_UP" = "null" ] || [ "$TARGETS_UP" -lt 1 ]; then
+            echo "Prometheus has no healthy scrape targets"; exit 1
+          fi
+          echo "### Monitoring: Prometheus ready, ${TARGETS_UP} targets up" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate Grafana is healthy
+        run: |
+          kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80 >/dev/null 2>&1 &
+          sleep 8
+          curl --fail -s http://localhost:3000/api/health | tee grafana-health.json
+          echo "### Monitoring: Grafana $(jq -r .database grafana-health.json), version $(jq -r .version grafana-health.json)" >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================
+  # Destroy (manual only) - saves CloudLabs credit
+  # =========================================================
+  destroy:
+    name: Terraform destroy
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+
+    defaults:
+      run:
+        working-directory: infra/terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Export Azure service principal for Terraform
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          for key in clientId clientSecret subscriptionId tenantId; do
+            echo "::add-mask::$(jq -r ".$key" <<< "$AZURE_CREDENTIALS")"
+          done
+          {
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_SUBSCRIPTION_ID=$(jq -r .subscriptionId <<< "$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<< "$AZURE_CREDENTIALS")"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=week10.terraform.tfstate"
+
+      # CloudLabs lets us create but not delete role assignments, so forget the
+      # AcrPull assignment first (it is removed with the ACR anyway).
+      - name: Remove AcrPull role assignment from state
+        run: terraform state rm 'azurerm_role_assignment.acr_pull[0]' || true
+
+      - name: Terraform destroy
+        run: terraform destroy -input=false -auto-approve
